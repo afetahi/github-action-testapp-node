@@ -4,7 +4,7 @@ const os = require('os');
 const app = express();
 const port = process.env.PORT || 3000;
 const startedAt = Date.now();
-
+const greeting = process.env.GREETING_NAME || 'Alban';
 
 let visits = 0;
 
@@ -21,7 +21,7 @@ function serverInfo() {
   const uptimeSeconds = Math.floor((Date.now() - startedAt) / 1000);
   return {
     greeting,
-    message: `Hello World! Im a Web App living in Azure App Service,
+    message: `Hello World! I'm a web app living in Azure App Service 🚀`,
     time: new Date().toISOString(),
     uptimeSeconds,
     visits,
