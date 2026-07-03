@@ -17,6 +17,7 @@
   },
   "homepage": "https://github.com/AzureAppService/github-action-testapp-node#readme",
   "dependencies": {
+    "@azure/monitor-opentelemetry": "^1.0.0",
     "express": "^4.17.1"
   }
 }

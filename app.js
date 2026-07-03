@@ -1,3 +1,12 @@
+// Application Insights via Azure Monitor OpenTelemetry.
+// Must run BEFORE requiring express/http so those modules get auto-instrumented.
+// No-op locally unless APPLICATIONINSIGHTS_CONNECTION_STRING is set.
+const { useAzureMonitor } = require('@azure/monitor-opentelemetry');
+if (process.env.APPLICATIONINSIGHTS_CONNECTION_STRING) {
+  useAzureMonitor();
+  console.log('Azure Monitor OpenTelemetry enabled.');
+}
+
 const express = require('express');
 const os = require('os');
 
