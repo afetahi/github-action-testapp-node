@@ -30,7 +30,7 @@ function serverInfo() {
   const uptimeSeconds = Math.floor((Date.now() - startedAt) / 1000);
   return {
     greeting,
-    message: `Hello World! It is me Alban :)  I'm a web app living in Azure App Service 🚀`,
+    message: `Hello World! I'm a web app living in Azure App Service 🚀`,
     time: new Date().toISOString(),
     uptimeSeconds,
     visits,
