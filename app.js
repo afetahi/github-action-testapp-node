@@ -9,6 +9,7 @@ if (process.env.APPLICATIONINSIGHTS_CONNECTION_STRING) {
 
 const express = require('express');
 const os = require('os');
+const crypto = require('crypto');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -53,6 +54,28 @@ function formatUptime(seconds) {
   return `${h}h ${m}m ${s}s`;
 }
 
+// Structured request logging: one JSON line per request on stdout, so the
+// App Service console logs (and Log Analytics) carry route, status and latency.
+app.use((req, res, next) => {
+  const start = process.hrtime.bigint();
+  const requestId = (req.get('x-request-id') || crypto.randomUUID()).slice(0, 64);
+  res.set('x-request-id', requestId);
+  res.on('finish', () => {
+    const status = res.statusCode;
+    console.log(JSON.stringify({
+      ts: new Date().toISOString(),
+      level: status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info',
+      msg: 'request',
+      method: req.method,
+      path: req.path,
+      status,
+      durationMs: Math.round(Number(process.hrtime.bigint() - start) / 1e6),
+      requestId
+    }));
+  });
+  next();
+});
+
 // JSON APIs
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000), time: new Date().toISOString() });
@@ -60,6 +83,83 @@ app.get('/api/health', (req, res) => {
 
 app.get('/api/info', (req, res) => {
   res.json(serverInfo());
+});
+
+// Fault-injection endpoints for SRE Agent lab scenarios (see README).
+// They return 404 unless the app setting CHAOS_ENABLED=true, and every fault is capped.
+const CHAOS_ENABLED = process.env.CHAOS_ENABLED === 'true';
+const CHAOS_LIMITS = { slowMs: 10000, cpuSeconds: 30, maxCpuBurns: 2, memoryMb: 200 };
+const heldMemory = [];
+let activeCpuBurns = 0;
+
+function requireChaos(req, res, next) {
+  if (!CHAOS_ENABLED) return res.status(404).json({ error: 'Not found' });
+  next();
+}
+
+function boundedInt(value, fallback, max) {
+  const n = Number.parseInt(value, 10);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.min(n, max);
+}
+
+function heldMemoryMb() {
+  return heldMemory.reduce((total, buf) => total + buf.length, 0) / (1024 * 1024);
+}
+
+app.get('/api/chaos', (req, res) => {
+  res.json({
+    enabled: CHAOS_ENABLED,
+    limits: CHAOS_LIMITS,
+    activeCpuBurns,
+    heldMemoryMb: heldMemoryMb()
+  });
+});
+
+// Latency: delays the response (default 3 s, max 10 s).
+app.get('/api/slow', requireChaos, (req, res) => {
+  const ms = boundedInt(req.query.ms, 3000, CHAOS_LIMITS.slowMs);
+  setTimeout(() => res.json({ fault: 'slow', delayedMs: ms }), ms);
+});
+
+// Errors: throws, so the error handler logs a stack trace and returns HTTP 500.
+app.get('/api/error', requireChaos, () => {
+  throw new Error('Simulated downstream dependency failure (chaos: /api/error)');
+});
+
+// CPU: busy-loops in the background for N seconds (default 10, max 30, at most 2 at once).
+// Work runs in 50 ms slices so the app still answers other requests.
+app.get('/api/cpu', requireChaos, (req, res) => {
+  if (activeCpuBurns >= CHAOS_LIMITS.maxCpuBurns) {
+    return res.status(429).json({ error: 'CPU fault already running', activeCpuBurns });
+  }
+  const seconds = boundedInt(req.query.seconds, 10, CHAOS_LIMITS.cpuSeconds);
+  const end = Date.now() + seconds * 1000;
+  activeCpuBurns++;
+  (function burn() {
+    const sliceEnd = Math.min(Date.now() + 50, end);
+    while (Date.now() < sliceEnd) Math.sqrt(Math.random());
+    if (Date.now() < end) return setImmediate(burn);
+    activeCpuBurns--;
+  })();
+  res.json({ fault: 'cpu', seconds, activeCpuBurns });
+});
+
+// Memory: holds N MB until released (default 50, total cap 200 MB).
+app.get('/api/memory', requireChaos, (req, res) => {
+  const mb = boundedInt(req.query.mb, 50, CHAOS_LIMITS.memoryMb);
+  const held = heldMemoryMb();
+  if (held + mb > CHAOS_LIMITS.memoryMb) {
+    return res.status(429).json({ error: 'Memory cap reached', heldMemoryMb: held });
+  }
+  heldMemory.push(Buffer.alloc(mb * 1024 * 1024, 1));
+  res.json({ fault: 'memory', addedMb: mb, heldMemoryMb: heldMemoryMb() });
+});
+
+app.get('/api/memory/release', requireChaos, (req, res) => {
+  const released = heldMemoryMb();
+  heldMemory.length = 0;
+  res.json({ fault: 'memory', releasedMb: released, heldMemoryMb: 0 });
 });
 
 // Landing page
@@ -130,6 +230,23 @@ app.get('/', (req, res) => {
   </script>
 </body>
 </html>`);
+});
+
+// Error handler: logs the stack trace as one JSON line and returns a JSON 500.
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  const requestId = res.get('x-request-id');
+  console.error(JSON.stringify({
+    ts: new Date().toISOString(),
+    level: 'error',
+    msg: err.message,
+    method: req.method,
+    path: req.path,
+    requestId,
+    stack: err.stack
+  }));
+  if (res.headersSent) return;
+  res.status(500).json({ error: 'Internal Server Error', requestId });
 });
 
 app.listen(port, () => {
